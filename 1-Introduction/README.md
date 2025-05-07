@@ -14,12 +14,16 @@ Once you are familiar with the above three files, feel free to run the notebook 
 
 ### **2. Portfolio Allocation**
 
-The notebook ***FinRL_PortfolioAllocation_NeurIPS_2020.ipynb*** shows how to use FinRL do the classic task of portfolio allocation. 
+The notebook ***FinRL_PortfolioAllocation_NeurIPS_2020.ipynb*** shows how to use FinRL do the classic task of portfolio allocation.
 
 ***FinRL_PortfolioAllocation_NeurIPS_2020.py*** is a single python file that contains all the codes.
 
 
 ### **3. China A share**
+
+```
+pip install wrds swig trading_calendars pandas_market_calendars akshare shimmy kaleido
+```
 
 ***China_A_share_market_tushare.ipynb*** demonstrates how to trade on China A share market. We connect with the Tushare library to fetch data from China A share market.
 

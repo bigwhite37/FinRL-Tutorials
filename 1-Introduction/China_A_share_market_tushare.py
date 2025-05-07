@@ -7,10 +7,20 @@ from IPython import display
 
 display.set_matplotlib_formats("svg")
 
+# Add FinRL-Meta directory to the import path for meta imports
+import sys
+import os
+# Ensure FinRL-Meta/meta is on the import path
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+FINRL_META_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '..', 'FinRL-Meta'))
+print(f'FINRL_META_DIR: {FINRL_META_DIR}, SCRIPT_DIR: {SCRIPT_DIR}')
+sys.path.insert(0, FINRL_META_DIR)
+
 from meta import config
 from meta.data_processor import DataProcessor
+from meta.data_processors._base import DataSource
 from main import check_and_make_directories
-from meta.data_processors.tushare import Tushare, ReturnPlotter
+from meta.data_processors.akshare import Akshare, ReturnPlotter
 from meta.env_stock_trading.env_stocktrading_China_A_shares import (
     StockTradingEnv,
 )
@@ -49,21 +59,6 @@ print("ALL Modules have been imported!")
 
 ### Create folders
 
-import os
-
-"""
-use check_and_make_directories() to replace the following
-
-if not os.path.exists("./datasets"):
-    os.makedirs("./datasets")
-if not os.path.exists("./trained_models"):
-    os.makedirs("./trained_models")
-if not os.path.exists("./tensorboard_log"):
-    os.makedirs("./tensorboard_log")
-if not os.path.exists("./results"):
-    os.makedirs("./results")
-"""
-
 check_and_make_directories(
     [DATA_SAVE_DIR, TRAINED_MODEL_DIR, TENSORBOARD_LOG_DIR, RESULTS_DIR]
 )
@@ -71,35 +66,77 @@ check_and_make_directories(
 
 ### Download data, cleaning and feature engineering
 
-ticker_list = [
-    "600000.SH",
-    "600009.SH",
-    "600016.SH",
-    "600028.SH",
-    "600030.SH",
-    "600031.SH",
-    "600036.SH",
-    "600050.SH",
-    "600104.SH",
-    "600196.SH",
-    "600276.SH",
-    "600309.SH",
-    "600519.SH",
-    "600547.SH",
-    "600570.SH",
-]
+# 根据市值和流动性筛选股票
+import akshare as ak
+
+# 获取A股所有股票列表
+stock_info_a_code_name = ak.stock_info_a_code_name()
+stock_info_a_code_name = stock_info_a_code_name[:1000]
+
+# 获取股票流动性和市值数据
+def get_stocks_by_criteria(min_market_cap=500, min_daily_volume=50000000):
+    selected_stocks = []
+    for idx, row in stock_info_a_code_name.iterrows():
+        code = row["code"]
+        # 获取股票基本信息
+        stock_info = ak.stock_individual_info_em(symbol=code)
+        print(f"处理股票: {code} - {row['name']}")
+
+        # 获取市值（总市值单位为元，转换为亿元）
+        if '总市值' in stock_info['item'].values:
+            market_cap_raw = stock_info.loc[stock_info['item'] == '总市值', 'value'].values[0]
+            market_cap = float(market_cap_raw) / 100000000  # 元转亿元
+        else:
+            print(f"警告: 股票 {code} 没有找到总市值数据")
+            continue
+
+        # 获取成交量数据（通过历史数据计算平均值）
+        from datetime import datetime, timedelta
+        end_date = datetime.today().strftime("%Y%m%d")
+        start_date = (datetime.today() - timedelta(days=30)).strftime("%Y%m%d")
+        # 获取最近30个交易日数据
+        stock_hist = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust="")
+        if not stock_hist.empty and '成交量' in stock_hist.columns:
+            daily_volume = stock_hist['成交量'].mean()
+        else:
+            print(f"警告: 股票 {code} 没有找到成交量数据")
+            continue
+
+        # 打印调试信息
+        print(f"  市值: {market_cap:.2f}亿元, 日均成交量: {daily_volume:.0f}")
+
+        # 筛选条件
+        if market_cap >= min_market_cap and daily_volume >= min_daily_volume:
+            # 转换为适合akshare的格式
+            if code.startswith('6'):
+                formatted_code = f"{code}.SH"
+            else:
+                formatted_code = f"{code}.SZ"
+            selected_stocks.append(formatted_code)
+            print(f"  已选择: {formatted_code}")
+
+        # 限制数量
+        if len(selected_stocks) >= 30:
+            print(f"已达到30只股票限制，停止筛选")
+            break
+
+    print(f"共选择了 {len(selected_stocks)} 只股票")
+    return selected_stocks
+
+# 使用函数获取股票
+ticker_list = get_stocks_by_criteria()
+print(f"ticker_list: {ticker_list}")
 
 TRAIN_START_DATE = "2015-01-01"
 TRAIN_END_DATE = "2019-08-01"
 TRADE_START_DATE = "2019-08-01"
 TRADE_END_DATE = "2020-01-03"
 
-
-TIME_INTERVAL = "1d"
+TIME_INTERVAL = "daily"
 kwargs = {}
 kwargs["token"] = "27080ec403c0218f96f388bca1b1d85329d563c91a43672239619ef5"
 p = DataProcessor(
-    data_source="tushare",
+    data_source=DataSource.akshare,
     start_date=TRAIN_START_DATE,
     end_date=TRADE_END_DATE,
     time_interval=TIME_INTERVAL,
@@ -139,8 +176,10 @@ env_kwargs = {
     "stock_dim": stock_dimension,
     "hmax": 1000,
     "initial_amount": 1000000,
-    "buy_cost_pct": 6.87e-5,
-    "sell_cost_pct": 1.0687e-3,
+    # 买入时只收 佣金 + 结算监管费
+    "buy_cost_pct": 0.00025 + 0.00004,   # ≈0.00029 (0.029%)
+    # 卖出时加上印花税和（沪市）过户费
+    "sell_cost_pct": 0.00025 + 0.00100 + 0.00002 + 0.00004,  # ≈0.00131 (0.131%)
     "reward_scaling": 1e-4,
     "state_space": state_space,
     "action_space": stock_dimension,
@@ -170,8 +209,17 @@ model_ddpg = agent.get_model(
 )
 
 trained_ddpg = agent.train_model(
-    model=model_ddpg, tb_log_name="ddpg", total_timesteps=10000
+    model=model_ddpg, tb_log_name="ddpg", total_timesteps=100000
 )
+
+# 创建保存目录（如果不存在）
+model_save_dir = os.path.join(FINRL_META_DIR, "trained_models", "ddpg")
+os.makedirs(model_save_dir, exist_ok=True)
+
+# 保存模型
+model_save_path = os.path.join(model_save_dir, "best_model.zip")
+trained_ddpg.save(model_save_path)
+print(f"模型已保存到: {model_save_path}")
 
 ## A2C
 
@@ -189,8 +237,8 @@ env_kwargs = {
     "stock_dim": stock_dimension,
     "hmax": 1000,
     "initial_amount": 1000000,
-    "buy_cost_pct": 6.87e-5,
-    "sell_cost_pct": 1.0687e-3,
+    "buy_cost_pct": 0.00025 + 0.00004,   # ≈0.00029 (0.029%)
+    "sell_cost_pct": 0.00025 + 0.00100 + 0.00002 + 0.00004,  # ≈0.00131 (0.131%)
     "reward_scaling": 1e-4,
     "state_space": state_space,
     "action_space": stock_dimension,
@@ -227,7 +275,7 @@ baseline_df = plotter.get_baseline("399300")
 
 
 daily_return = plotter.get_return(df_account_value)
-daily_return_base = plotter.get_return(baseline_df, value_col_name="close")
+daily_return_base = plotter.get_return(baseline_df, 'close')
 
 perf_func = timeseries.perf_stats
 perf_stats_all = perf_func(
@@ -242,7 +290,7 @@ print(f"perf_stats_all: {perf_stats_all}")
 
 
 daily_return = plotter.get_return(df_account_value)
-daily_return_base = plotter.get_return(baseline_df, value_col_name="close")
+daily_return_base = plotter.get_return(baseline_df, 'close')
 
 perf_func = timeseries.perf_stats
 perf_stats_all = perf_func(
@@ -253,5 +301,4 @@ perf_stats_all = perf_func(
     turnover_denom="AGB",
 )
 print("==============Baseline Strategy Stats===========")
-
 print(f"perf_stats_all: {perf_stats_all}")
